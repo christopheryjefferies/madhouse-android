@@ -1,0 +1,15 @@
+{
+  "appId": "uk.madhouse.darts",
+  "appName": "Madhouse",
+  "webDir": "www",
+  "backgroundColor": "#0b2c1b",
+  "appendUserAgent": "MadhouseApp/1",
+  "server": {
+    "url": "https://darts.christopheryjefferies.workers.dev/",
+    "errorPath": "offline.html",
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "SystemBars": { "style": "DARK" }
+  }
+}
