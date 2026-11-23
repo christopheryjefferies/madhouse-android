@@ -11,6 +11,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.Voice;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.util.Base64;
@@ -34,7 +36,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -85,6 +90,108 @@ public class MhVisionPlugin extends Plugin {
                 Log.e(TAG, "load failed", t);
                 call.reject("Native engine unavailable: " + t.getMessage());
             }
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The caller: Android's own text-to-speech (the web speech that Chrome has isn't available inside the app).
+
+    private TextToSpeech tts;
+    private boolean ttsReady = false, ttsFailed = false;
+    private final List<Runnable> ttsWaiting = new ArrayList<>();
+    private String ttsVoice = null;
+
+    private void withTts(final Runnable r) {
+        getActivity().runOnUiThread(() -> {
+            if (ttsReady) { r.run(); return; }
+            ttsWaiting.add(r);
+            if (tts != null || ttsFailed) { if (ttsFailed) runWaiting(); return; }
+            tts = new TextToSpeech(getContext(), status -> {
+                getActivity().runOnUiThread(() -> {
+                    if (status == TextToSpeech.SUCCESS) {
+                        try { tts.setLanguage(Locale.UK); } catch (Throwable ignored) {}
+                        ttsReady = true;
+                    } else {
+                        ttsFailed = true;
+                    }
+                    runWaiting();
+                });
+            });
+        });
+    }
+
+    private void runWaiting() {
+        List<Runnable> w = new ArrayList<>(ttsWaiting);
+        ttsWaiting.clear();
+        for (Runnable x : w) {
+            try { x.run(); } catch (Throwable t) { Log.w(TAG, "tts", t); }
+        }
+    }
+
+    // A male UK voice if the phone has one (Google's are named en-gb-x-gbd / en-gb-x-rjs), else any UK voice
+    private Voice pickVoice(String wanted) {
+        Voice best = null;
+        int bestScore = -1;
+        try {
+            for (Voice v : tts.getVoices()) {
+                if (wanted != null && !wanted.isEmpty() && v.getName().equals(wanted)) return v;
+                Locale l = v.getLocale();
+                if (l == null || !"en".equals(l.getLanguage())) continue;
+                int sc = 0;
+                if ("GB".equalsIgnoreCase(l.getCountry())) sc += 10;
+                String n = v.getName().toLowerCase(Locale.ROOT);
+                if (n.contains("gbd") || n.contains("rjs") || n.contains("male") && !n.contains("female")) sc += 5;
+                if (!v.isNetworkConnectionRequired()) sc += 2;
+                if (sc > bestScore) { bestScore = sc; best = v; }
+            }
+        } catch (Throwable ignored) {}
+        return best;
+    }
+
+    @PluginMethod
+    public void speak(final PluginCall call) {
+        final String text = call.getString("text", "");
+        final String voice = call.getString("voice", "");
+        final float pitch = call.getFloat("pitch", 0.85f);
+        final float rate = call.getFloat("rate", 1.0f);
+        withTts(() -> {
+            if (!ttsReady) { call.reject("No text-to-speech on this phone"); return; }
+            try {
+                if (ttsVoice == null || !ttsVoice.equals(voice)) {
+                    Voice v = pickVoice(voice);
+                    if (v != null) tts.setVoice(v);
+                    ttsVoice = voice;
+                }
+                tts.setPitch(pitch);
+                tts.setSpeechRate(rate);
+                tts.speak(text, TextToSpeech.QUEUE_ADD, null, "mh" + System.nanoTime());
+                call.resolve();
+            } catch (Throwable t) {
+                call.reject("Couldn't speak: " + t.getMessage());
+            }
+        });
+    }
+
+    @PluginMethod
+    public void voices(final PluginCall call) {
+        withTts(() -> {
+            JSArray a = new JSArray();
+            if (ttsReady) {
+                try {
+                    for (Voice v : tts.getVoices()) {
+                        Locale l = v.getLocale();
+                        if (l == null || !"en".equals(l.getLanguage())) continue;
+                        JSObject o = new JSObject();
+                        o.put("name", v.getName());
+                        o.put("locale", l.toLanguageTag());
+                        o.put("net", v.isNetworkConnectionRequired());
+                        a.put(o);
+                    }
+                } catch (Throwable ignored) {}
+            }
+            JSObject r = new JSObject();
+            r.put("voices", a);
+            call.resolve(r);
         });
     }
 
@@ -382,6 +489,7 @@ public class MhVisionPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        try { if (tts != null) tts.shutdown(); } catch (Throwable ignored) {}
         worker.shutdown();
         try {
             if (session != null) session.close();
