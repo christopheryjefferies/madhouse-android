@@ -5,7 +5,12 @@ import ai.onnxruntime.OnnxValue;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 import ai.onnxruntime.providers.NNAPIFlags;
+import android.content.ContentValues;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.util.Base64;
@@ -21,6 +26,8 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
@@ -79,6 +86,48 @@ public class MhVisionPlugin extends Plugin {
                 call.reject("Native engine unavailable: " + t.getMessage());
             }
         });
+    }
+
+    // Save a text file (backup, camera report) into the phone's Downloads folder.
+    @PluginMethod
+    public void saveFile(final PluginCall call) {
+        final String name = call.getString("name", "madhouse.json");
+        final String text = call.getString("text", "");
+        final String mime = call.getString("mime", "application/json");
+        new Thread(() -> {
+            try {
+                byte[] data = text.getBytes(StandardCharsets.UTF_8);
+                String where;
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                    v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                    v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                    Uri u = getContext().getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    if (u == null) throw new IllegalStateException("Couldn't create the file");
+                    try (OutputStream o = getContext().getContentResolver().openOutputStream(u)) {
+                        if (o == null) throw new IllegalStateException("Couldn't open the file");
+                        o.write(data);
+                    }
+                    where = "Download/" + name;
+                } else {
+                    File d = getContext().getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                    if (d == null) d = getContext().getFilesDir();
+                    if (!d.exists()) d.mkdirs();
+                    File f = new File(d, name);
+                    try (FileOutputStream o = new FileOutputStream(f)) {
+                        o.write(data);
+                    }
+                    where = f.getAbsolutePath();
+                }
+                JSObject r = new JSObject();
+                r.put("where", where);
+                call.resolve(r);
+            } catch (Throwable t) {
+                Log.e(TAG, "saveFile failed", t);
+                call.reject("Couldn't save: " + t.getMessage());
+            }
+        }).start();
     }
 
     // How far the first-time model download has got (answered straight away, not queued behind the download)
