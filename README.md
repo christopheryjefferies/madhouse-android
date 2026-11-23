@@ -24,3 +24,5 @@ same key, or people have to uninstall and reinstall.
 - An offline page if the app is opened for the very first time with no internet
 
 Camera scoring uses the Dart Sense model by Ben Willshaw (CC BY-NC 4.0), so Madhouse stays free.
+
+First signed build: November 2026.
