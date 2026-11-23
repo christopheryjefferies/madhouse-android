@@ -29,9 +29,12 @@ public class MainActivity extends BridgeActivity {
                     return;
                 }
                 wv.evaluateJavascript(
-                    "(function(){try{return !!(window.mhBack&&window.mhBack());}catch(e){return false;}})()",
+                    "(function(){try{if(!window.mhBack)return 'page';return !!window.mhBack();}catch(e){return false;}})()",
                     value -> {
-                        if (!"true".equals(value)) moveTaskToBack(true);
+                        if ("true".equals(value)) return;
+                        // on another page (such as the privacy policy): go back to Madhouse
+                        if ("\"page\"".equals(value) && wv.canGoBack()) { wv.goBack(); return; }
+                        moveTaskToBack(true);
                     }
                 );
             }
