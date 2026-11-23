@@ -5,6 +5,7 @@ import ai.onnxruntime.OnnxValue;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 import ai.onnxruntime.providers.NNAPIFlags;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.util.Base64;
@@ -16,7 +17,12 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
@@ -27,6 +33,10 @@ import java.util.concurrent.Executors;
 
 /**
  * Runs the Dart Sense model natively, on the phone's AI chip where it helps.
+ *
+ * The model is not built into the app (to keep the download small): the first time the camera
+ * is used it is downloaded from the Madhouse site and kept on the phone. The fastest engine is
+ * remembered, so the timing test only runs once.
  *
  * At start-up it tries each engine this phone offers (the AI chip through Android's neural
  * networks API, then the phone's own processor two ways), times a few test runs of each, and
@@ -49,13 +59,16 @@ public class MhVisionPlugin extends Plugin {
     private String report = "";
     private double engineMs = 0;
     private FloatBuffer input;
+    private volatile long dlGot = 0, dlTotal = 0;
+    private static final String MODEL_FILE = "darts-sense-v1.onnx";
     private final int[] pixels = new int[S * S];
 
     @PluginMethod
     public void load(final PluginCall call) {
+        final String url = call.getString("url");
         worker.execute(() -> {
             try {
-                if (session == null) init();
+                if (session == null) init(url);
                 JSObject r = new JSObject();
                 r.put("engine", engine);
                 r.put("ms", Math.round(engineMs));
@@ -68,6 +81,15 @@ public class MhVisionPlugin extends Plugin {
         });
     }
 
+    // How far the first-time model download has got (answered straight away, not queued behind the download)
+    @PluginMethod
+    public void progress(final PluginCall call) {
+        JSObject r = new JSObject();
+        r.put("got", dlGot);
+        r.put("total", dlTotal);
+        call.resolve(r);
+    }
+
     @PluginMethod
     public void detect(final PluginCall call) {
         final String img = call.getString("img");
@@ -77,7 +99,7 @@ public class MhVisionPlugin extends Plugin {
         }
         worker.execute(() -> {
             try {
-                if (session == null) init();
+                if (session == null) throw new IllegalStateException("Not loaded");
                 long t0 = System.nanoTime();
                 byte[] jpg = Base64.decode(img, Base64.DEFAULT);
                 Bitmap bm = BitmapFactory.decodeByteArray(jpg, 0, jpg.length);
@@ -110,12 +132,29 @@ public class MhVisionPlugin extends Plugin {
 
     // ---------------------------------------------------------------------------------------
 
-    private void init() throws Exception {
+    private void init(String url) throws Exception {
         env = OrtEnvironment.getEnvironment();
-        byte[] model = readAsset("darts-sense-v1.onnx");
+        byte[] model = modelBytes(url);
         input = ByteBuffer.allocateDirect(3 * S * S * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
 
-        int cores = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
+        // Already timed on this phone? Use that engine straight away.
+        SharedPreferences prefs = getContext().getSharedPreferences("mhvision", 0);
+        String saved = prefs.getString("engine", null);
+        if (saved != null) {
+            try {
+                OrtSession s = env.createSession(model, options(saved));
+                inputName = s.getInputNames().iterator().next();
+                session = s;
+                engine = saved;
+                engineMs = prefs.getFloat("ms", 0f);
+                report = prefs.getString("report", "") + " (saved)";
+                return;
+            } catch (Throwable t) {
+                Log.w(TAG, "saved engine " + saved + " failed; timing again", t);
+                prefs.edit().remove("engine").apply();
+            }
+        }
+
         String[] kinds = { "chip", "cpu", "xnnpack" };
         OrtSession best = null;
         String bestKind = null;
@@ -125,17 +164,7 @@ public class MhVisionPlugin extends Plugin {
         for (String kind : kinds) {
             OrtSession s = null;
             try {
-                OrtSession.SessionOptions o = new OrtSession.SessionOptions();
-                o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
-                if (kind.equals("chip")) {
-                    o.addNnapi(EnumSet.of(NNAPIFlags.USE_FP16));
-                } else if (kind.equals("cpu")) {
-                    o.setIntraOpNumThreads(cores);
-                } else {
-                    o.setIntraOpNumThreads(1);
-                    o.addXnnpack(Collections.singletonMap("intra_op_num_threads", String.valueOf(cores)));
-                }
-                s = env.createSession(model, o);
+                s = env.createSession(model, options(kind));
                 if (inputName == null) inputName = s.getInputNames().iterator().next();
                 double ms = bench(s);
                 rep.append(kind).append(' ').append(Math.round(ms)).append("ms; ");
@@ -157,12 +186,73 @@ public class MhVisionPlugin extends Plugin {
                 }
             }
         }
-        if (best == null) throw new IllegalStateException("No engine worked: " + rep);
+        if (best == null) {
+            // perhaps a damaged download: remove it so the next attempt fetches a fresh copy
+            new File(new File(getContext().getFilesDir(), "models"), MODEL_FILE).delete();
+            throw new IllegalStateException("No engine worked: " + rep);
+        }
         session = best;
         engine = bestKind;
         engineMs = bestMs;
         report = rep.toString();
+        prefs.edit().putString("engine", engine).putFloat("ms", (float) engineMs).putString("report", report).apply();
         Log.i(TAG, "Using " + engine + " (" + report + ")");
+    }
+
+    private OrtSession.SessionOptions options(String kind) throws Exception {
+        int cores = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors()));
+        OrtSession.SessionOptions o = new OrtSession.SessionOptions();
+        o.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
+        if (kind.equals("chip")) {
+            o.addNnapi(EnumSet.of(NNAPIFlags.USE_FP16));
+        } else if (kind.equals("cpu")) {
+            o.setIntraOpNumThreads(cores);
+        } else {
+            o.setIntraOpNumThreads(1);
+            o.addXnnpack(Collections.singletonMap("intra_op_num_threads", String.valueOf(cores)));
+        }
+        return o;
+    }
+
+    // The model, from the phone if it has been downloaded before, otherwise from the Madhouse site.
+    private byte[] modelBytes(String url) throws Exception {
+        File dir = new File(getContext().getFilesDir(), "models");
+        if (!dir.exists()) dir.mkdirs();
+        File f = new File(dir, MODEL_FILE);
+        if (f.exists() && f.length() > 1000000) {
+            try (InputStream in = new FileInputStream(f)) {
+                return readAll(in, (int) f.length());
+            }
+        }
+        if (url == null || url.isEmpty()) throw new IllegalStateException("No model address");
+        File part = new File(dir, MODEL_FILE + ".part");
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(30000);
+        try {
+            if (c.getResponseCode() != 200) throw new IllegalStateException("Model download failed: " + c.getResponseCode());
+            dlTotal = Math.max(0, c.getContentLengthLong());
+            dlGot = 0;
+            try (InputStream in = c.getInputStream(); FileOutputStream out = new FileOutputStream(part)) {
+                byte[] b = new byte[1 << 16];
+                int r;
+                while ((r = in.read(b)) > 0) {
+                    out.write(b, 0, r);
+                    dlGot += r;
+                }
+            }
+        } finally {
+            c.disconnect();
+        }
+        if (part.length() < 1000000 || (dlTotal > 0 && part.length() != dlTotal)) {
+            part.delete();
+            throw new IllegalStateException("Model download incomplete");
+        }
+        if (f.exists()) f.delete();
+        if (!part.renameTo(f)) throw new IllegalStateException("Couldn't save the model");
+        try (InputStream in = new FileInputStream(f)) {
+            return readAll(in, (int) f.length());
+        }
     }
 
     // A few runs on a plain grey picture; the first run sets things up, so it is ignored.
@@ -233,14 +323,12 @@ public class MhVisionPlugin extends Plugin {
         }
     }
 
-    private byte[] readAsset(String name) throws Exception {
-        try (InputStream in = getContext().getAssets().open(name)) {
-            ByteArrayOutputStream bo = new ByteArrayOutputStream(13 << 20);
-            byte[] b = new byte[1 << 16];
-            int r;
-            while ((r = in.read(b)) > 0) bo.write(b, 0, r);
-            return bo.toByteArray();
-        }
+    private static byte[] readAll(InputStream in, int sizeHint) throws Exception {
+        ByteArrayOutputStream bo = new ByteArrayOutputStream(Math.max(sizeHint, 1 << 16));
+        byte[] b = new byte[1 << 16];
+        int r;
+        while ((r = in.read(b)) > 0) bo.write(b, 0, r);
+        return bo.toByteArray();
     }
 
     @Override

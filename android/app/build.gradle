@@ -12,8 +12,8 @@ android {
         versionName "1.0." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
-            // ARM phones only (every real Android phone); leaving out emulator chips keeps the download smaller
-            abiFilters "arm64-v8a", "armeabi-v7a"
+            // 64-bit phones only (everything from the last several years); keeps the download small
+            abiFilters "arm64-v8a"
         }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

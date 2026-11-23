@@ -25,8 +25,9 @@ same key, or people have to uninstall and reinstall.
 - Native dart detection: on first use it times the phone's AI chip (Android neural networks API)
   and its main processor, and keeps the fastest. Madhouse sends it the same 800x800 picture it
   would otherwise score in the browser; if the native engine fails, Madhouse falls back to the
-  browser engine automatically. The model (`android/app/src/main/assets/darts-sense-v1.onnx`) is
-  Dart Sense v1, simplified with onnxsim (identical output).
+  browser engine automatically. The model isn't built into the app: it is downloaded
+  from the site (`cam/darts-sense-v1.onnx`) the first time the camera is used, then kept on the
+  phone. The winning engine is remembered, so the timing test runs once per phone.
 
 Camera scoring uses the Dart Sense model by Ben Willshaw (CC BY-NC 4.0), so Madhouse stays free.
 
