@@ -5,9 +5,16 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -20,13 +27,13 @@ jobs:
         with:
           node-version: "22"
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install
         run: npm ci
 
       - name: Sync app shell
-        run: npx cap sync android
+        run: |
+          npx cap telemetry off < /dev/null || true
+          npx cap sync android < /dev/null
 
       - name: Unpack signing key
         env:
@@ -44,7 +51,7 @@ jobs:
           MH_KEY_ALIAS: madhouse
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease bundleRelease
+          ./gradlew --no-daemon --console=plain assembleRelease bundleRelease
           cp app/build/outputs/apk/release/app-release.apk ../madhouse.apk
           cp app/build/outputs/bundle/release/app-release.aab ../madhouse.aab
 
