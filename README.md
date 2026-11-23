@@ -22,7 +22,11 @@ same key, or people have to uninstall and reinstall.
 - Keeps the screen awake while open
 - Android Back button closes pop-ups and uses each screen's own Back button; it never quits a game
 - An offline page if the app is opened for the very first time with no internet
+- Native dart detection: on first use it times the phone's AI chip (Android neural networks API)
+  and its main processor, and keeps the fastest. Madhouse sends it the same 800x800 picture it
+  would otherwise score in the browser; if the native engine fails, Madhouse falls back to the
+  browser engine automatically. The model (`android/app/src/main/assets/darts-sense-v1.onnx`) is
+  Dart Sense v1, simplified with onnxsim (identical output).
 
 Camera scoring uses the Dart Sense model by Ben Willshaw (CC BY-NC 4.0), so Madhouse stays free.
 
-First signed build: November 2026.

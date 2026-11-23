@@ -10,6 +10,8 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Native dart detection (AI chip where it helps); must be registered before the bridge starts.
+        registerPlugin(MhVisionPlugin.class);
         super.onCreate(savedInstanceState);
 
         // Keep the screen awake while Madhouse is open (scoring, camera, games in progress).
